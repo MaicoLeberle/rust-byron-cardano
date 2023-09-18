@@ -24,6 +24,12 @@ use crate::{
 use cbor_event::{self, de::Deserializer, se::Serializer};
 use chain_core::property;
 
+use util::hex;
+use cryptoxide::ed25519;
+use std::convert::TryInto;
+
+extern crate pallas;
+
 // Transaction IDs are either a hash of the CBOR serialisation of a
 // given Tx, or a hash of a redeem address.
 pub type TxId = Blake2b256;
@@ -140,7 +146,7 @@ impl TxInWitness {
         TxInWitness::RedeemWitness(key.public(), key.sign(&vec))
     }
 
-    fn prepare_byte_to_sign(
+    pub fn prepare_byte_to_sign(
         protocol_magic: ProtocolMagic,
         sign_tag: SigningTag,
         txid: &TxId,
@@ -953,6 +959,50 @@ mod tests {
 
         assert!(cbor_event::test_encode_decode(&txaux).expect("encode/decode TxAux"));
     }
+
+    #[test]
+    // #[should_panic(expected = "Unable to verify signature")]
+    fn test_verify_signature() {
+        let tx_hash_hex = "a06e5a0150e09f8983be2deafab9e04afc60d92e7110999eb672c903343f1e26";
+        let witness_cbor = "8200D8185885825840888CDF85991D85F2023423BA4C80D41570EBF1FC878C9F5731DF1D20C64AECF3E8AA2BBAFC9BEBA8EF33ACB4D7E199B445229085718FBA83B7F86AB6A3BCF782584063E34CF5FA6D8C0288630437FA5E151D93907E826E66BA273145E3EE712930B6F446FF81CB91D7F0CB4CECCD0466BA9AB14448D7EAB9FC480A122324BD80170E";
+        match hex::decode(witness_cbor) {
+            Ok(bytes) => match pallas::codec::minicbor::decode::<pallas::ledger::primitives::byron::Twit>(&bytes[..]) {
+                Ok(pallas::ledger::primitives::byron::Twit::PkWitness(wit_cborwrap)) => {
+                    let (pub_key_decoded, signature_decoded): (
+                        pallas::codec::minicbor::bytes::ByteVec,
+                        pallas::codec::minicbor::bytes::ByteVec
+                    ) = wit_cborwrap.unwrap();
+                    let mut pub_key: Vec<u8> = pub_key_decoded.into();
+                    pub_key.truncate(32);
+                    let signature: Vec<u8> = signature_decoded.into();
+                    match hex::decode(tx_hash_hex) {
+                        Ok(tx_hash) => {
+                            let prot_magic: ProtocolMagic = ProtocolMagic::new(764824073);
+                            let tx_id: TxId = Blake2b256::new(&tx_hash);
+                            let data_to_sign = TxInWitness::prepare_byte_to_sign(
+                                prot_magic,
+                                SigningTag::Tx,
+                                &tx_id
+                            );
+                            assert!(
+                                ed25519::verify(
+                                    &data_to_sign,
+                                    &convert_to_32_byte_array(pub_key),
+                                    &signature
+                                ),
+                                "Unable to verify signature"
+                            );
+                        },
+                        Err(_) => panic!(
+                            "Hex-encoded transaction hash couldn't be decoded into a byte array."
+                        ),
+                    }
+                },
+                _ => panic!("Byte array couldn't be decoded into Twit structure value."),
+            },
+            Err(_) => println!("Hex-encoded CBOR couldn't be decoded into a byte array."),
+        }
+    }
 }
 
 #[cfg(feature = "with-bench")]
@@ -996,4 +1046,11 @@ mod bench {
             let _: TxAux = RawCbor::from(TX_AUX).deserialize().unwrap();
         })
     }
+}
+
+fn convert_to_32_byte_array<T>(v: Vec<T>) -> [T; 32] {
+    v.try_into()
+        .unwrap_or_else(
+            |v: Vec<T>| panic!("Expected a Vec of length {} but it was {}", 32, v.len())
+        )
 }
